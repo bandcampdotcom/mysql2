@@ -69,6 +69,12 @@ RSpec.describe Mysql2::Result do
       end
     end
 
+    it "should be able to return results as a struct" do
+      @result.each(as: :struct) do |row|
+        expect(row).to be_kind_of(Struct)
+      end
+    end
+
     it "should cache previously yielded results by default" do
       expect(@result.first.object_id).to eql(@result.first.object_id)
     end
@@ -115,6 +121,7 @@ RSpec.describe Mysql2::Result do
       expect(result.fields).to eql(%w[a b c])
     end
 
+<<<<<<< HEAD
     it "should return an array of frozen strings" do
       result = @client.query "SELECT 'a', 'b', 'c'"
       result.fields.each do |f|
@@ -204,6 +211,11 @@ RSpec.describe Mysql2::Result do
 
       result = @client.query("SELECT JSON_OBJECT('key', 'value')")
       expect(result.field_types).to eql(['json'])
+=======
+    it "should return field names as symbols if rows are structs" do
+      result = @client.query "SELECT 'a', 'b', 'c'", as: :struct
+      expect(result.fields.first).to be_an_instance_of(Symbol)
+>>>>>>> db4a06d3e7b14029e42489eeba4a976200e5171b
     end
   end
 
