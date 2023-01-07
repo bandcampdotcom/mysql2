@@ -831,6 +831,7 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const r
                     offset = rb_funcall(cMysql2Client, intern_local_offset, 0);
                     val = rb_funcall(val, intern_new_offset, 1, offset);
                   } else { /* utc */
+                    VALUE defaults, opts, as_opt, block, (*fetch_row_func)(VALUE, MYSQL_FIELD *fields, const result_each_args *args);
                     val = rb_funcall(val, intern_new_offset, 1, opt_utc_offset);
                   }
                 }
