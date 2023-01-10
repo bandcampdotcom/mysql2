@@ -1047,7 +1047,7 @@ static VALUE rb_mysql_result_each_(VALUE self,
 
 static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
   result_each_args args;
-  VALUE defaults, opts, (*fetch_row_func)(VALUE, MYSQL_FIELD *fields, const result_each_args *args);
+  VALUE defaults, opts, as_opt, block, (*fetch_row_func)(VALUE, MYSQL_FIELD *fields, const result_each_args *args);
   ID db_timezone, app_timezone, dbTz, appTz;
   int symbolizeKeys, rowsAs, castBool, cacheRows, cast;
 
