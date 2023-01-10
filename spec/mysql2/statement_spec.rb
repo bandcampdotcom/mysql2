@@ -1,3 +1,5 @@
+# rubocop:disable Metrics/BlockLength
+
 require './spec/spec_helper'
 
 RSpec.describe Mysql2::Statement do
@@ -734,3 +736,5 @@ RSpec.describe Mysql2::Statement do
     end
   end
 end
+
+# rubocop:enable Metrics/BlockLength
