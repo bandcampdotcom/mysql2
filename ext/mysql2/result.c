@@ -39,6 +39,7 @@ typedef struct {
   int symbolizeKeys;
   int rowsAs;
   int castBool;
+  int castDateAsTime;
   int cacheRows;
   int cast;
   int streaming;
@@ -56,6 +57,7 @@ static ID intern_new, intern_utc, intern_local, intern_localtime, intern_local_o
 static VALUE sym_symbolize_keys, sym_as, sym_array, sym_database_timezone,
   sym_application_timezone, sym_local, sym_utc, sym_cast_booleans,
   sym_cache_rows, sym_cast, sym_stream, sym_name;
+static VALUE sym_cast_dates_as_times;
 
 static VALUE sym_struct;
 
@@ -405,6 +407,19 @@ static unsigned int msec_char_to_uint(char *msec_char, size_t len)
   return (unsigned int)strtoul(msec_char, NULL, 10);
 }
 
+static VALUE new_time(unsigned int year, unsigned int month, unsigned int day, unsigned int hour, unsigned int minute, unsigned int second, unsigned long second_part, const result_each_args *args)
+{
+  VALUE val = rb_funcall(rb_cTime, args->db_timezone, 7, UINT2NUM(year), UINT2NUM(month), UINT2NUM(day), UINT2NUM(hour), UINT2NUM(minute), UINT2NUM(second), ULONG2NUM(second_part));
+  if (!NIL_P(args->app_timezone)) {
+    if (args->app_timezone == intern_local) {
+      val = rb_funcall(val, intern_localtime, 0);
+    } else { // utc
+      val = rb_funcall(val, intern_utc, 0);
+    }
+  }
+  return val;
+}
+
 static void rb_mysql_result_alloc_result_buffers(VALUE self, MYSQL_FIELD *fields) {
   unsigned int i;
   GET_RESULT(self);
@@ -606,7 +621,11 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
         case MYSQL_TYPE_DATE:         // MYSQL_TIME
         case MYSQL_TYPE_NEWDATE:      // MYSQL_TIME
           ts = (MYSQL_TIME*)result_buffer->buffer;
-          val = rb_funcall(cDate, intern_new, 3, INT2NUM(ts->year), INT2NUM(ts->month), INT2NUM(ts->day));
+          if (args->castDateAsTime) {
+            val = new_time(ts->year, ts->month, ts->day, 0, 0, 0, 0, args);
+          } else {
+            val = rb_funcall(cDate, intern_new, 3, INT2NUM(ts->year), INT2NUM(ts->month), INT2NUM(ts->day));
+          }
           break;
         case MYSQL_TYPE_TIME:         // MYSQL_TIME
           ts = (MYSQL_TIME*)result_buffer->buffer;
@@ -641,14 +660,7 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
               }
             }
           } else {
-            val = rb_funcall(rb_cTime, args->db_timezone, 7, UINT2NUM(ts->year), UINT2NUM(ts->month), UINT2NUM(ts->day), UINT2NUM(ts->hour), UINT2NUM(ts->minute), UINT2NUM(ts->second), ULONG2NUM(ts->second_part));
-            if (!NIL_P(args->app_timezone)) {
-              if (args->app_timezone == intern_local) {
-                val = rb_funcall(val, intern_localtime, 0);
-              } else { // utc
-                val = rb_funcall(val, intern_utc, 0);
-              }
-            }
+            val = new_time(ts->year, ts->month, ts->day, ts->hour, ts->minute, ts->second, ts->second_part, args);
           }
           break;
         }
@@ -836,14 +848,7 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const r
                 }
               } else {
                 msec = msec_char_to_uint(msec_char, sizeof(msec_char));
-                val = rb_funcall(rb_cTime, args->db_timezone, 7, UINT2NUM(year), UINT2NUM(month), UINT2NUM(day), UINT2NUM(hour), UINT2NUM(min), UINT2NUM(sec), UINT2NUM(msec));
-                if (!NIL_P(args->app_timezone)) {
-                  if (args->app_timezone == intern_local) {
-                    val = rb_funcall(val, intern_localtime, 0);
-                  } else { /* utc */
-                    val = rb_funcall(val, intern_utc, 0);
-                  }
-                }
+                val = new_time(year, month, day, hour, min, sec, msec, args);
               }
             }
           }
@@ -865,7 +870,11 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const r
               rb_raise(cMysql2Error, "Invalid date in field '%.*s': %s", fields[i].name_length, fields[i].name, row[i]);
               val = Qnil;
             } else {
-              val = rb_funcall(cDate, intern_new, 3, UINT2NUM(year), UINT2NUM(month), UINT2NUM(day));
+              if (args->castDateAsTime) {
+                val = new_time(year, month, day, 0, 0, 0, 0, args);
+              } else {
+                val = rb_funcall(cDate, intern_new, 3, UINT2NUM(year), UINT2NUM(month), UINT2NUM(day));
+              }
             }
           }
           break;
@@ -1048,7 +1057,8 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
   result_each_args args;
   VALUE defaults, opts, as_opt, (*fetch_row_func)(VALUE, MYSQL_FIELD *fields, const result_each_args *args);
   ID db_timezone, app_timezone, dbTz, appTz;
-  int symbolizeKeys, rowsAs, castBool, cacheRows, cast;
+  int symbolizeKeys, rowsAs, asArray, castBool, cacheRows, cast;
+  int castDateAsTime;
 
   GET_RESULT(self);
 
@@ -1069,6 +1079,7 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
 
   symbolizeKeys = RTEST(rb_hash_aref(opts, sym_symbolize_keys));
   castBool      = RTEST(rb_hash_aref(opts, sym_cast_booleans));
+  castDateAsTime = RTEST(rb_hash_aref(opts, sym_cast_dates_as_times));
   cacheRows     = RTEST(rb_hash_aref(opts, sym_cache_rows));
   cast          = RTEST(rb_hash_aref(opts, sym_cast));
 
@@ -1132,6 +1143,7 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
   args.symbolizeKeys = symbolizeKeys;
   args.rowsAs = rowsAs;
   args.castBool = castBool;
+  args.castDateAsTime = castDateAsTime;
   args.cacheRows = cacheRows;
   args.cast = cast;
   args.db_timezone = db_timezone;
@@ -1247,6 +1259,7 @@ void init_mysql2_result() {
   sym_local           = ID2SYM(rb_intern("local"));
   sym_utc             = ID2SYM(rb_intern("utc"));
   sym_cast_booleans   = ID2SYM(rb_intern("cast_booleans"));
+  sym_cast_dates_as_times   = ID2SYM(rb_intern("cast_dates_as_times"));
   sym_database_timezone     = ID2SYM(rb_intern("database_timezone"));
   sym_application_timezone  = ID2SYM(rb_intern("application_timezone"));
   sym_cache_rows     = ID2SYM(rb_intern("cache_rows"));
