@@ -31,9 +31,13 @@ static rb_encoding *binaryEncoding;
 #define MYSQL_TYPE_JSON 245
 #endif
 
+#ifndef NEW_TYPEDDATA_WRAPPER
+#define TypedData_Get_Struct(obj, type, ignore, sval) Data_Get_Struct(obj, type, sval)
+#endif
+
 #define GET_RESULT(self) \
   mysql2_result_wrapper *wrapper; \
-  Data_Get_Struct(self, mysql2_result_wrapper, wrapper);
+  TypedData_Get_Struct(self, mysql2_result_wrapper, &rb_mysql_result_type, wrapper);
 
 typedef struct {
   int symbolizeKeys;
@@ -136,6 +140,48 @@ static void rb_mysql_result_free(void *ptr) {
 
   xfree(wrapper);
 }
+
+static size_t rb_mysql_result_memsize(const void * wrapper) {
+  const mysql2_result_wrapper * w = wrapper;
+  size_t memsize = sizeof(*w);
+  if (w->stmt_wrapper) {
+    memsize += sizeof(*w->stmt_wrapper);
+  }
+  if (w->client_wrapper) {
+    memsize += sizeof(*w->client_wrapper);
+  }
+  return memsize;
+}
+
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+static void rb_mysql_result_compact(void * wrapper) {
+  mysql2_result_wrapper * w = wrapper;
+  if (w) {
+    rb_mysql2_gc_location(w->fields);
+    rb_mysql2_gc_location(w->rows);
+    rb_mysql2_gc_location(w->encoding);
+    rb_mysql2_gc_location(w->client);
+    rb_mysql2_gc_location(w->statement);
+  }
+}
+#endif
+
+static const rb_data_type_t rb_mysql_result_type = {
+  "rb_mysql_result",
+  {
+    rb_mysql_result_mark,
+    rb_mysql_result_free,
+    rb_mysql_result_memsize,
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+    rb_mysql_result_compact,
+#endif
+  },
+  0,
+  0,
+#ifdef RUBY_TYPED_FREE_IMMEDIATELY
+  RUBY_TYPED_FREE_IMMEDIATELY,
+#endif
+};
 
 static VALUE rb_mysql_result_free_(VALUE self) {
   GET_RESULT(self);
@@ -375,6 +421,7 @@ static VALUE mysql2_set_field_string_encoding(VALUE val, MYSQL_FIELD field, rb_e
     int enc_index;
 
     enc_name = (field.charsetnr-1 < MYSQL2_CHARSETNR_SIZE) ? mysql2_mysql_enc_to_rb[field.charsetnr-1] : NULL;
+
 
     if (enc_name != NULL) {
       /* use the field encoding we were able to match */
@@ -1185,7 +1232,11 @@ VALUE rb_mysql_result_to_obj(VALUE client, VALUE encoding, VALUE options, MYSQL_
   VALUE obj;
   mysql2_result_wrapper * wrapper;
 
+#ifdef NEW_TYPEDDATA_WRAPPER
+  obj = TypedData_Make_Struct(cMysql2Result, mysql2_result_wrapper, &rb_mysql_result_type, wrapper);
+#else
   obj = Data_Make_Struct(cMysql2Result, mysql2_result_wrapper, rb_mysql_result_mark, rb_mysql_result_free, wrapper);
+#endif
   wrapper->numberOfFields = 0;
   wrapper->numberOfRows = 0;
   wrapper->lastRowProcessed = 0;

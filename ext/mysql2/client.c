@@ -120,53 +120,80 @@ struct nogvl_select_db_args {
 
 static VALUE rb_set_ssl_mode_option(VALUE self, VALUE setting) {
   unsigned long version = mysql_get_client_version();
+  const char *version_str = mysql_get_client_info();
 
-  if (version < 50703) {
-    rb_warn( "Your mysql client library does not support setting ssl_mode; full support comes with 5.7.11." );
+  /* Warn about versions that are known to be incomplete; these are pretty
+   * ancient, we want people to upgrade if they need SSL/TLS to work
+   *
+   * MySQL 5.x before 5.6.30 -- ssl_mode introduced but not fully working until 5.6.36)
+   * MySQL 5.7 before 5.7.3 -- ssl_mode introduced but not fully working until 5.7.11)
+   */
+  if ((version >= 50000 && version < 50630) || (version >= 50700 && version < 50703)) {
+    rb_warn("Your mysql client library version %s does not support setting ssl_mode; full support comes with 5.6.36+, 5.7.11+, 8.0+", version_str);
     return Qnil;
   }
+
+  /* For these versions, map from the options we're exposing to Ruby to the constant available:
+   *   ssl_mode: :verify_identity to MYSQL_OPT_SSL_VERIFY_SERVER_CERT = 1
+   *   ssl_mode: :required to MYSQL_OPT_SSL_ENFORCE = 1
+   *   ssl_mode: :disabled to MYSQL_OPT_SSL_ENFORCE = 0
+   */
 #if defined(HAVE_CONST_MYSQL_OPT_SSL_VERIFY_SERVER_CERT) || defined(HAVE_CONST_MYSQL_OPT_SSL_ENFORCE)
   GET_CLIENT(self);
-  int val = NUM2INT( setting );
-  // Either MySQL 5.7.3 - 5.7.10, or Connector/C 6.1.3 - 6.1.x, or MariaDB 10.x and later
-  if ((version >= 50703 && version < 50711) || (version >= 60103 && version < 60200) || version >= 100000) {
+  int val = NUM2INT(setting);
+
+  /* Expected code path for MariaDB 10.x and MariaDB Connector/C 3.x
+   * Workaround code path for MySQL 5.7.3 - 5.7.10 and MySQL Connector/C 6.1.3 - 6.1.x
+   */
+  if (version >= 100000                         // MariaDB (all versions numbered 10.x)
+    || (version >= 30000 && version < 40000)    // MariaDB Connector/C (all versions numbered 3.x)
+    || (version >= 50703 && version < 50711)    // Workaround for MySQL 5.7.3 - 5.7.10
+    || (version >= 60103 && version < 60200)) { // Workaround for MySQL Connector/C 6.1.3 - 6.1.x
 #ifdef HAVE_CONST_MYSQL_OPT_SSL_VERIFY_SERVER_CERT
     if (val == SSL_MODE_VERIFY_IDENTITY) {
       my_bool b = 1;
-      int result = mysql_options( wrapper->client, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &b );
+      int result = mysql_options(wrapper->client, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &b);
       return INT2NUM(result);
     }
 #endif
 #ifdef HAVE_CONST_MYSQL_OPT_SSL_ENFORCE
     if (val == SSL_MODE_DISABLED || val == SSL_MODE_REQUIRED) {
-      my_bool b = ( val == SSL_MODE_REQUIRED );
-      int result = mysql_options( wrapper->client, MYSQL_OPT_SSL_ENFORCE, &b );
+      my_bool b = (val == SSL_MODE_REQUIRED);
+      int result = mysql_options(wrapper->client, MYSQL_OPT_SSL_ENFORCE, &b);
       return INT2NUM(result);
     }
 #endif
-    rb_warn( "Your mysql client library does not support ssl_mode %d.", val );
+    rb_warn("Your mysql client library version %s does not support ssl_mode %d", version_str, val);
     return Qnil;
   } else {
-    rb_warn( "Your mysql client library does not support ssl_mode as expected." );
+    rb_warn("Your mysql client library version %s does not support ssl_mode as expected", version_str);
     return Qnil;
   }
 #endif
+
+  /* For other versions -- known to be MySQL 5.6.36+, 5.7.11+, 8.0+
+   * pass the value of the argument to MYSQL_OPT_SSL_MODE -- note the code
+   * mapping from atoms / constants is in the MySQL::Client Ruby class
+   */
 #ifdef FULL_SSL_MODE_SUPPORT
   GET_CLIENT(self);
-  int val = NUM2INT( setting );
+  int val = NUM2INT(setting);
 
   if (val != SSL_MODE_DISABLED && val != SSL_MODE_PREFERRED && val != SSL_MODE_REQUIRED && val != SSL_MODE_VERIFY_CA && val != SSL_MODE_VERIFY_IDENTITY) {
     rb_raise(cMysql2Error, "ssl_mode= takes DISABLED, PREFERRED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY, you passed: %d", val );
   }
-  int result = mysql_options( wrapper->client, MYSQL_OPT_SSL_MODE, &val );
+  int result = mysql_options(wrapper->client, MYSQL_OPT_SSL_MODE, &val);
 
   return INT2NUM(result);
 #endif
+
+  // Warn if we get this far
 #ifdef NO_SSL_MODE_SUPPORT
-  rb_warn( "Your mysql client library does not support setting ssl_mode; full support comes with 5.7.11." );
+  rb_warn("Your mysql client library does not support setting ssl_mode");
   return Qnil;
 #endif
 }
+
 /*
  * non-blocking mysql_*() functions that we won't be wrapping since
  * they do not appear to hit the network nor issue any interruptible
@@ -192,10 +219,46 @@ static VALUE rb_set_ssl_mode_option(VALUE self, VALUE setting) {
 static void rb_mysql_client_mark(void * wrapper) {
   mysql_client_wrapper * w = wrapper;
   if (w) {
-    rb_gc_mark(w->encoding);
-    rb_gc_mark(w->active_fiber);
+    rb_gc_mark_movable(w->encoding);
+    rb_gc_mark_movable(w->active_fiber);
   }
 }
+
+/* this is called during GC */
+static void rb_mysql_client_free(void *ptr) {
+  mysql_client_wrapper *wrapper = ptr;
+  decr_mysql2_client(wrapper);
+}
+
+static size_t rb_mysql_client_memsize(const void * wrapper) {
+  const mysql_client_wrapper * w = wrapper;
+  return sizeof(*w);
+}
+
+static void rb_mysql_client_compact(void * wrapper) {
+  mysql_client_wrapper * w = wrapper;
+  if (w) {
+    rb_mysql2_gc_location(w->encoding);
+    rb_mysql2_gc_location(w->active_fiber);
+  }
+}
+
+const rb_data_type_t rb_mysql_client_type = {
+  "rb_mysql_client",
+  {
+    rb_mysql_client_mark,
+    rb_mysql_client_free,
+    rb_mysql_client_memsize,
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+    rb_mysql_client_compact,
+#endif
+  },
+  0,
+  0,
+#ifdef RUBY_TYPED_FREE_IMMEDIATELY
+  RUBY_TYPED_FREE_IMMEDIATELY,
+#endif
+};
 
 static VALUE rb_raise_mysql2_error(mysql_client_wrapper *wrapper) {
   VALUE rb_error_msg = rb_str_new2(mysql_error(wrapper->client));
@@ -303,12 +366,6 @@ static void *nogvl_close(void *ptr) {
   return NULL;
 }
 
-/* this is called during GC */
-static void rb_mysql_client_free(void *ptr) {
-  mysql_client_wrapper *wrapper = ptr;
-  decr_mysql2_client(wrapper);
-}
-
 void decr_mysql2_client(mysql_client_wrapper *wrapper)
 {
   wrapper->refcount--;
@@ -340,7 +397,11 @@ void decr_mysql2_client(mysql_client_wrapper *wrapper)
 static VALUE allocate(VALUE klass) {
   VALUE obj;
   mysql_client_wrapper * wrapper;
+#ifdef NEW_TYPEDDATA_WRAPPER
+  obj = TypedData_Make_Struct(klass, mysql_client_wrapper, &rb_mysql_client_type, wrapper);
+#else
   obj = Data_Make_Struct(klass, mysql_client_wrapper, rb_mysql_client_mark, rb_mysql_client_free, wrapper);
+#endif
   wrapper->encoding = Qnil;
   wrapper->active_fiber = Qnil;
   wrapper->automatic_close = 1;
@@ -1689,7 +1750,7 @@ void init_mysql2_client() {
   rb_const_set(cMysql2Client, rb_intern("SESSION_TRACK_TRANSACTION_STATE"), INT2NUM(SESSION_TRACK_TRANSACTION_STATE));
 #endif
 
-#if defined(FULL_SSL_MODE_SUPPORT) // MySQL 5.7.11 and above
+#if defined(FULL_SSL_MODE_SUPPORT) // MySQL 5.6.36 and MySQL 5.7.11 and above
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_DISABLED"), INT2NUM(SSL_MODE_DISABLED));
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_PREFERRED"), INT2NUM(SSL_MODE_PREFERRED));
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_REQUIRED"), INT2NUM(SSL_MODE_REQUIRED));
